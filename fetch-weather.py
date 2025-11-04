@@ -1,6 +1,7 @@
 import argparse
 from datetime import datetime
 from enum import StrEnum
+from itertools import accumulate
 from pathlib import Path
 import pickle
 from subprocess import run
@@ -15,6 +16,7 @@ import requests_cache
 from retry_requests import retry
 
 class C(StrEnum):
+	ACCUMULATED_PRECIPITATION = "accumulated_precipitation"  # not fetched from the API
 	APPARENT_TEMPERATURE = "apparent_temperature"
 	CLOUD_COVER = "cloud_cover"
 	DATE_FORMAT = "%Y-%m-%dT%H:%M"
@@ -44,6 +46,23 @@ CACHE_FILE = Path.home() / "weather.pickle"
 LOCAL_TIME_ZONE = now().timezone
 DEFAULT_START_TIME = now().add(hours=1).set(minute=0, second=0, microsecond=0)
 METER_TO_FEET_RATIO = 3.28084
+REQUESTED_METRIC_LIST = (
+	C.TEMPERATURE,
+	C.DEW_POINT,
+	C.PRECIPITATION,
+	C.WIND_SPEED_10M,
+	C.WIND_GUSTS_10M,
+	C.CLOUD_COVER,
+)
+REPORT_ORDER_LIST = (
+	C.TEMPERATURE,
+	C.DEW_POINT,
+	C.PRECIPITATION,
+	C.ACCUMULATED_PRECIPITATION,
+	C.CLOUD_COVER,
+	C.WIND_SPEED_10M,
+	C.WIND_GUSTS_10M,
+)
 
 
 def create_multi_line_charts(
@@ -123,7 +142,7 @@ def create_multi_line_charts(
 	# 3. Add a main title to the overall figure
 	fig.suptitle(main_title, fontsize=18, fontweight='bold')
 
-	# 4. Final layout adjustments and saving
+	# 4. Final layout adjustments
 	plt.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust space for suptitle
 	fig.subplots_adjust(top=0.92)
 
@@ -136,7 +155,7 @@ def get_units_of_measurement(measurement_name: str) -> str:
 			return "°F"
 		case C.WIND_GUSTS_10M | C.WIND_SPEED_10M:
 			return "mph"
-		case C.PRECIPITATION:
+		case C.PRECIPITATION | C.ACCUMULATED_PRECIPITATION:
 			return "mm"
 		case C.CLOUD_COVER:
 			return "%"
@@ -145,21 +164,28 @@ def get_units_of_measurement(measurement_name: str) -> str:
 
 
 parser = argparse.ArgumentParser(description='Provide weather data.')
-parser.add_argument('--latitude', metavar="DEGREES", type=float, help="North of equator is positive.", default=39.9)
-parser.add_argument('--longitude', metavar="DEGREES", type=float, help="West of Prime Meridian is negative.", default=-105)
+parser.add_argument('coordinates', metavar="LATITUDE,LONGITUDE", type=str, help="North of equator is positive, west of Prime Meridian is negative.")
 parser.add_argument('--start-time', metavar="YYYY-MM-DD", help=f"Ignore forecast before this time. Default is {DEFAULT_START_TIME.format("YYYY-MM-DD HH:00 zz")}.", default=DEFAULT_START_TIME)
-parser.add_argument('--hours-limit', metavar="NUMBER", type=int, help="Don't go beyond this number of hours in the future.", default=24)
+parser.add_argument('--hours-limit', metavar="NUMBER", type=int, help="Don't go beyond this number of hours in the future.")
 logging_group = parser.add_mutually_exclusive_group()
 logging_group.add_argument('--verbose', action='store_true')
 logging_group.add_argument('--terse', action='store_true')
 error_list = list()
 args = parser.parse_args()
-latitude = args.latitude
-longitude = args.longitude
-if abs(latitude) >= 90:
-	error_list.append("Latitude must be between -90 and 90")
-if abs(longitude) >= 180:
-	error_list.append("Longitude must be between -180 and 180")
+coordinates = args.coordinates
+try:
+	# Northwest Alaska: 69, -163
+	# East Maine: 44, -67
+	# Hawaii: 19, -155
+	latitude, longitude = coordinates.replace(" ", "").split(",")
+	latitude = float(latitude)
+	longitude = float(longitude)
+	if latitude > 69 or latitude < 19:
+		error_list.append("Latitude must be between 19 and 69")
+	if longitude < -163 or longitude > -67:
+		error_list.append("Longitude must be between -67 and -163")
+except ValueError:
+	error_list.append(f"Invalid coordinates: {coordinates}")
 start_time = args.start_time
 hours_limit = args.hours_limit
 try:
@@ -172,21 +198,10 @@ if error_list:
 
 # cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
 # retry_session = retry(cache_session, retries=5, backoff_factor = 0.2)
-
-# Make sure all required weather variables are listed here
-# The order of variables in hourly or daily is important to assign them correctly below
-requested_metric_list = (
-	C.TEMPERATURE,
-	C.DEW_POINT,
-	C.PRECIPITATION,
-	C.WIND_SPEED_10M,
-	C.WIND_GUSTS_10M,
-	C.CLOUD_COVER,
-)
-params = {
+api_params = {
 	C.LATITUDE: latitude,
 	C.LONGITUDE: longitude,
-	C.HOURLY: requested_metric_list,
+	C.HOURLY: REQUESTED_METRIC_LIST,
 	C.TEMPERATURE_UNIT: C.FAHRENHEIT,
 	C.WIND_SPEED_UNIT: C.MPH,
 }
@@ -194,7 +209,7 @@ params = {
 if False and CACHE_FILE.exists():
 	data_dict = pickle.load(open(CACHE_FILE, "rb"))
 else:
-	response = requests.get(C.OPEN_METEO_URL, params=params)
+	response = requests.get(C.OPEN_METEO_URL, params=api_params)
 	data_dict = response.json()
 	with open(CACHE_FILE, "wb") as f:
 		pickle.dump(data_dict, f)
@@ -217,10 +232,13 @@ for stamp_str in data_dict[C.HOURLY][C.TIME][i:last]:
 	local_stamp = parse(stamp_str).set(tz=LOCAL_TIME_ZONE)
 	received_time_series.append(local_stamp.format("ddd hh A"))
 
+# Special: accumulated precipitation
+y_values = list(accumulate(data_dict[C.HOURLY][C.PRECIPITATION][i:last]))
+data_dict[C.HOURLY][C.ACCUMULATED_PRECIPITATION] = y_values
+
 data_for_plots = list()
-for key, received_metric in data_dict[C.HOURLY].items():
-	if key == C.TIME:
-		continue
+for key in REPORT_ORDER_LIST:
+	received_metric = data_dict[C.HOURLY][key]
 	single_plot_dict = {
 		C.X_VALUES: received_time_series,
 		C.Y_VALUES: received_metric[i:last],
