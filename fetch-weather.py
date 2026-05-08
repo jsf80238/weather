@@ -1,4 +1,5 @@
 import argparse
+import re
 from datetime import datetime
 from enum import StrEnum
 from itertools import accumulate
@@ -115,9 +116,9 @@ def create_multi_line_charts(
 			print(f"Error: Dataset {i + 1} is missing a required key: {e}")
 			continue
 
-		if len(x_labels) != len(y_measurements):
-			print(f"Warning: Data lengths mismatch for '{title}'. Skipping this plot.")
-			continue
+		if len(x_labels) > len(y_measurements):
+			print(f"Warning: {len(y_measurements)} measurements but expecting {len(x_labels)} '{title}'.")
+			x_labels = x_labels[:len(y_measurements)]
 
 		# Line plots typically use numeric axes. We plot against the index (0, 1, 2...)
 		# and then set the tick labels to the strings.
@@ -177,7 +178,8 @@ try:
 	# Northwest Alaska: 69, -163
 	# East Maine: 44, -67
 	# Hawaii: 19, -155
-	latitude, longitude = coordinates.replace(" ", "").split(",")
+	arg_list = coordinates.replace(" ", "").split(",")
+	latitude, longitude = arg_list[0], arg_list[-1]
 	latitude = float(latitude)
 	longitude = float(longitude)
 	if latitude > 69 or latitude < 19:
